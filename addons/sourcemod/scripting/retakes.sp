@@ -6,11 +6,7 @@
 
 #include "include/priorityqueue.inc"
 #include "include/queue.inc"
-#include "include/restorecvars.inc"
 #include "include/retakes.inc"
-
-#undef REQUIRE_PLUGIN
-#tryinclude <pugsetup>
 
 #pragma semicolon 1
 #pragma newdecls required
@@ -32,11 +28,8 @@
 #define POINTS_BOMB 50
 #define POINTS_LOSS 5000
 
-bool g_Enabled = true;
-ArrayList g_SavedCvars;
 
 /** Client variable arrays **/
-int g_SpawnIndices[MAXPLAYERS+1];
 int g_RoundPoints[MAXPLAYERS+1];
 bool g_PluginTeamSwitch[MAXPLAYERS+1];
 int g_Team[MAXPLAYERS+1];
@@ -48,18 +41,10 @@ ArrayList g_hRankingQueue;
 /** ConVar handles **/
 ConVar g_EnabledCvar;
 ConVar g_hAutoTeamsCvar;
-ConVar g_hCvarVersion;
-ConVar g_hEditorEnabled;
 ConVar g_hMaxPlayers;
 ConVar g_hRatioConstant;
 ConVar g_hRoundsToScramble;
-ConVar g_hRoundTime;
 ConVar g_hUseRandomTeams;
-ConVar g_WarmupTimeCvar;
-
-/** Editing global variables **/
-bool g_EditMode;
-bool g_DirtySpawns; // whether the spawns have been edited since loading from the file
 
 /** Win-streak data **/
 bool g_ScrambleSignal;
@@ -67,61 +52,20 @@ int g_WinStreak;
 int g_RoundCount;
 bool g_HalfTime;
 
-/** Stored info from the spawns config file **/
-#define MAX_SPAWNS 256
-int g_NumSpawns;
-bool g_SpawnDeleted[MAX_SPAWNS];
-float g_SpawnPoints[MAX_SPAWNS][3];
-float g_SpawnAngles[MAX_SPAWNS][3];
-Bombsite g_SpawnSites[MAX_SPAWNS];
-int g_SpawnTeams[MAX_SPAWNS];
-SpawnType g_SpawnTypes[MAX_SPAWNS];
-
-/** Spawns being edited per-client **/
-int g_EditingSpawnTeams[MAXPLAYERS+1];
-SpawnType g_EditingSpawnTypes[MAXPLAYERS+1];
-
-/** Bomb-site stuff read from the map **/
-ArrayList g_SiteMins;
-ArrayList g_SiteMaxs;
-
-/** Data created for the current retake scenario **/
-Bombsite g_Bombsite;
-bool g_SpawnTaken[MAX_SPAWNS];
-char g_PlayerPrimary[MAXPLAYERS+1][WEAPON_STRING_LENGTH];
-char g_PlayerSecondary[MAXPLAYERS+1][WEAPON_STRING_LENGTH];
-char g_PlayerNades[MAXPLAYERS+1][NADE_STRING_LENGTH];
-int g_PlayerHealth[MAXPLAYERS+1];
-int g_PlayerArmor[MAXPLAYERS+1];
-bool g_PlayerHelmet[MAXPLAYERS+1];
-bool g_PlayerKit[MAXPLAYERS+1];
-
 /** Per-round information about the player setup **/
-bool g_bombPlantSignal;
-bool g_bombPlanted;
-int g_BombOwner = -1;
 int g_NumCT;
 int g_NumT;
 int g_ActivePlayers;
-bool g_RoundSpawnsDecided; // spawns are lazily decided on the first player spawn event
 
 /** Forwards **/
-Handle g_hOnGunsCommand;
 Handle g_hOnPostRoundEnqueue;
 Handle g_hOnPreRoundEnqueue;
 Handle g_hOnTeamSizesSet;
 Handle g_hOnTeamsSet;
-Handle g_OnFailToPlant;
 Handle g_OnRoundWon;
-Handle g_OnSitePicked;
-Handle g_OnWeaponsAllocated;
 
 #include "retakes/generic.sp"
-#include "retakes/editor.sp"
-#include "retakes/editor_commands.sp"
-#include "retakes/editor_menus.sp"
 #include "retakes/natives.sp"
-#include "retakes/spawns.sp"
 
 
 
@@ -146,21 +90,13 @@ public void OnPluginStart() {
     /** ConVars **/
     g_EnabledCvar = CreateConVar("sm_retakes_enabled", "1", "Whether the plugin is enabled");
     g_hAutoTeamsCvar = CreateConVar("sm_retakes_auto_set_teams", "1", "Whether retakes is allowed to automanage team balance");
-    g_hEditorEnabled = CreateConVar("sm_retakes_editor_enabled", "1", "Whether the editor can be launched by admins");
     g_hMaxPlayers = CreateConVar("sm_retakes_maxplayers", "9", "Maximum number of players allowed in the game at once.", _, true, 2.0);
     g_hRatioConstant = CreateConVar("sm_retakes_ratio_constant", "0.425", "Ratio constant for team sizes.");
     g_hRoundsToScramble = CreateConVar("sm_retakes_scramble_rounds", "10", "Consecutive terrorist wins to cause a team scramble.");
-    g_hRoundTime = CreateConVar("sm_retakes_round_time", "12", "Round time left in seconds.");
     g_hUseRandomTeams = CreateConVar("sm_retakes_random_teams", "0", "If set to 1, this will randomize the teams every round.");
-    g_WarmupTimeCvar = CreateConVar("sm_retakes_warmuptime", "25", "Warmup time on map starts");
-
-    g_EnabledCvar.AddChangeHook(EnabledChanged);
 
     /** Create/Execute retakes cvars **/
     AutoExecConfig(true, "retakes", "sourcemod/retakes");
-
-    g_hCvarVersion = CreateConVar("sm_retakes_version", PLUGIN_VERSION, "Current retakes version", FCVAR_SPONLY|FCVAR_REPLICATED|FCVAR_NOTIFY|FCVAR_DONTRECORD);
-    g_hCvarVersion.SetString(PLUGIN_VERSION);
 
     /** Command hooks **/
     AddCommandListener(Command_JoinTeam, "jointeam");
@@ -169,66 +105,26 @@ public void OnPluginStart() {
     RegAdminCmd("sm_scramble", Command_ScrambleTeams, ADMFLAG_CHANGEMAP, "Sets teams to scramble on the next round");
     RegAdminCmd("sm_scrambleteams", Command_ScrambleTeams, ADMFLAG_CHANGEMAP, "Sets teams to scramble on the next round");
 
-    RegAdminCmd("sm_edit", Command_EditSpawns, ADMFLAG_CHANGEMAP, "Launches the retakes spawn editor mode");
-    RegAdminCmd("sm_spawns", Command_EditSpawns, ADMFLAG_CHANGEMAP, "Launches the retakes spawn editor mode");
-
-    RegAdminCmd("sm_new", Command_AddSpawn, ADMFLAG_CHANGEMAP, "Creates a new retakes spawn");
-    RegAdminCmd("sm_newspawn", Command_AddSpawn, ADMFLAG_CHANGEMAP, "Creates a new retakes spawn");
-    RegAdminCmd("sm_delete", Command_DeleteSpawn, ADMFLAG_CHANGEMAP, "Deletes the nearest retakes spawn");
-    RegAdminCmd("sm_deletespawn", Command_DeleteSpawn, ADMFLAG_CHANGEMAP, "Deletes the nearest retakes spawn");
-    RegAdminCmd("sm_deletemapspawns", Command_DeleteMapSpawns, ADMFLAG_CHANGEMAP, "Deletes all retakes spawns for the current map");
-
-    RegAdminCmd("sm_show", Command_Show, ADMFLAG_CHANGEMAP, "Shows all retakes spawns in a bombsite");
-    RegAdminCmd("sm_goto", Command_GotoSpawn, ADMFLAG_CHANGEMAP, "Goes to a retakes spawn");
-    RegAdminCmd("sm_nearest", Command_GotoNearestSpawn, ADMFLAG_CHANGEMAP, "Goes to nearest retakes spawn");
-
-    RegAdminCmd("sm_iteratespawns", Command_IterateSpawns, ADMFLAG_CHANGEMAP);
-    RegAdminCmd("sm_reloadspawns", Command_ReloadSpawns, ADMFLAG_CHANGEMAP, "Reloads retakes spawns for the current map, discarding changes");
-    RegAdminCmd("sm_savespawns", Command_SaveSpawns, ADMFLAG_CHANGEMAP, "Saves retakes spawns for the current map");
-
-    /** Player commands **/
-    RegConsoleCmd("sm_guns", Command_Guns);
-
     /** Event hooks **/
     HookEvent("player_connect_full", Event_PlayerConnectFull);
     HookEvent("player_team", Event_PlayerTeam, EventHookMode_Pre);
-    HookEvent("player_spawn", Event_PlayerSpawn);
     HookEvent("player_hurt", Event_DamageDealt);
     HookEvent("player_death", Event_PlayerDeath);
+    HookEvent("player_spawn", Event_PlayerSpawn);
     HookEvent("round_prestart", Event_RoundPreStart);
-    HookEvent("round_poststart", Event_RoundPostStart);
     HookEvent("round_freeze_end", Event_RoundFreezeEnd);
-    HookEvent("bomb_planted", Event_BombPlant);
-    HookEvent("bomb_exploded", Event_Bomb);
     HookEvent("bomb_defused", Event_Bomb);
     HookEvent("round_end", Event_RoundEnd);
     HookEvent("announce_phase_end", Event_HalfTime);
 
-    g_hOnGunsCommand = CreateGlobalForward("Retakes_OnGunsCommand", ET_Ignore, Param_Cell);
     g_hOnPostRoundEnqueue = CreateGlobalForward("Retakes_OnPostRoundEnqueue", ET_Ignore, Param_Cell, Param_Cell);
     g_hOnPreRoundEnqueue = CreateGlobalForward("Retakes_OnPreRoundEnqueue", ET_Ignore, Param_Cell, Param_Cell);
     g_hOnTeamSizesSet = CreateGlobalForward("Retakes_OnTeamSizesSet", ET_Ignore, Param_CellByRef, Param_CellByRef);
     g_hOnTeamsSet = CreateGlobalForward("Retakes_OnTeamsSet", ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
-    g_OnFailToPlant = CreateGlobalForward("Retakes_OnFailToPlant", ET_Ignore, Param_Cell);
     g_OnRoundWon = CreateGlobalForward("Retakes_OnRoundWon", ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
-    g_OnSitePicked = CreateGlobalForward("Retakes_OnSitePicked", ET_Ignore, Param_CellByRef);
-    g_OnWeaponsAllocated = CreateGlobalForward("Retakes_OnWeaponsAllocated", ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
 
-    g_SiteMins = new ArrayList(3);
-    g_SiteMaxs = new ArrayList(3);
     g_hWaitingQueue = Queue_Init();
     g_hRankingQueue = PQ_Init();
-
-    // Set inital spawn types.
-    for (int i = 0; i < MAX_SPAWNS; i++) {
-        g_SpawnTypes[i] = SpawnType_Normal;
-    }
-}
-
-public void OnPluginEnd() {
-    if (g_SavedCvars != null) {
-        RestoreCvars(g_SavedCvars, true);
-    }
 }
 
 public void OnMapStart() {
@@ -237,66 +133,7 @@ public void OnMapStart() {
     g_ScrambleSignal = false;
     g_WinStreak = 0;
     g_RoundCount = 0;
-    g_RoundSpawnsDecided = false;
     g_HalfTime = false;
-
-    g_bombPlanted = false;
-    g_bombPlantSignal = false;
-
-    FindSites();
-    g_NumSpawns = ParseSpawns();
-
-    g_EditMode = false;
-    CreateTimer(1.0, Timer_ShowSpawns, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
-
-    if (!g_Enabled)
-        return;
-
-    ExecConfigs();
-
-    // Restart warmup for players to connect.
-    StartTimedWarmup(g_WarmupTimeCvar.IntValue);
-}
-
-public void OnMapEnd() {
-    if (!g_Enabled) {
-        return;
-    }
-
-    if (g_DirtySpawns) {
-        WriteSpawns();
-    }
-}
-
-public int EnabledChanged(Handle cvar, const char[] oldValue, const char[] newValue) {
-    bool wasEnabled = !StrEqual(oldValue, "0");
-    g_Enabled = !StrEqual(newValue, "0");
-
-    if (wasEnabled && !g_Enabled) {
-        if (g_SavedCvars != null)
-            RestoreCvars(g_SavedCvars, true);
-
-    } else if (!wasEnabled && g_Enabled) {
-        Queue_Clear(g_hWaitingQueue);
-        ExecConfigs();
-        for (int i = 1; i <= MaxClients; i++)  {
-            if (IsClientConnected(i) && !IsFakeClient(i)) {
-                OnClientConnected(i);
-                if (IsClientInGame(i) && IsOnTeam(i)) {
-                    SwitchPlayerTeam(i, CS_TEAM_SPECTATOR);
-                    Queue_Enqueue(g_hWaitingQueue, i);
-                    FakeClientCommand(i, "jointeam 2");
-                }
-            }
-        }
-    }
-}
-
-public void ExecConfigs() {
-    if (g_SavedCvars != null) {
-        CloseCvarStorage(g_SavedCvars);
-    }
-    g_SavedCvars = ExecuteAndSaveCvars("sourcemod/retakes/retakes_game.cfg");
 }
 
 public void OnClientConnected(int client) {
@@ -312,48 +149,11 @@ public void OnClientDisconnect(int client) {
  * Helper functions that resets client variables when they join or leave.
  */
 public void ResetClientVariables(int client) {
-    if (client == g_BombOwner)
-        g_BombOwner = -1;
     Queue_Drop(g_hWaitingQueue, client);
     g_Team[client] = CS_TEAM_SPECTATOR;
     g_PluginTeamSwitch[client] = false;
     g_RoundPoints[client] = -POINTS_LOSS;
 }
-
-public Action Command_ScrambleTeams(int client, int args) {
-    if (g_Enabled) {
-        g_ScrambleSignal = true;
-        Retakes_MessageToAll("%t", "AdminScrambleTeams", client);
-    }
-}
-
-public Action Command_Guns(int client, int args) {
-    if (g_Enabled) {
-        Call_StartForward(g_hOnGunsCommand);
-        Call_PushCell(client);
-        Call_Finish();
-    }
-    return Plugin_Handled;
-}
-
-public Action OnClientSayCommand(int client, const char[] command, const char[] args) {
-    if (!g_Enabled) {
-        return Plugin_Continue;
-    }
-
-    static char gunsChatCommands[][] = { "gun", "guns", ".gun", ".guns", "!gun", "gnus" };
-    for (int i = 0; i < sizeof(gunsChatCommands); i++) {
-        if (strcmp(args[0], gunsChatCommands[i], false) == 0) {
-            Call_StartForward(g_hOnGunsCommand);
-            Call_PushCell(client);
-            Call_Finish();
-            break;
-        }
-    }
-
-    return Plugin_Continue;
-}
-
 
 /***********************
  *                     *
@@ -362,17 +162,12 @@ public Action OnClientSayCommand(int client, const char[] command, const char[] 
  ***********************/
 
 public Action Command_JoinTeam(int client, const char[] command, int argc) {
-    if (!g_Enabled || g_hAutoTeamsCvar.IntValue == 0) {
+    if (!g_EnabledCvar.BoolValue || g_hAutoTeamsCvar.IntValue == 0) {
         return Plugin_Continue;
     }
 
     if (!IsValidClient(client) || argc < 1)
         return Plugin_Handled;
-
-    if (g_EditMode) {
-        MovePlayerToEditMode(client);
-        return Plugin_Handled;
-    }
 
     char arg[4];
     GetCmdArg(1, arg, sizeof(arg));
@@ -401,6 +196,13 @@ public Action Command_JoinTeam(int client, const char[] command, int argc) {
         } else {
             return PlacePlayer(client);
         }
+    }
+}
+
+public Action Command_ScrambleTeams(int client, int args) {
+    if (g_EnabledCvar.BoolValue) {
+        g_ScrambleSignal = true;
+        Retakes_MessageToAll("%t", "AdminScrambleTeams", client);
     }
 }
 
@@ -441,7 +243,7 @@ public Action PlacePlayer(int client) {
  * Called when a player joins a team, silences team join events
  */
 public Action Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)  {
-    if (!g_Enabled) {
+    if (!g_EnabledCvar.BoolValue) {
         return Plugin_Continue;
     }
 
@@ -456,41 +258,13 @@ public Action Event_PlayerTeam(Event event, const char[] name, bool dontBroadcas
  * put on that team and spawned, so we can't allow that.
  */
 public Action Event_PlayerConnectFull(Event event, const char[] name, bool dontBroadcast) {
-    if (!g_Enabled) {
-        return;
+    if (!g_EnabledCvar.BoolValue) {
+        return Plugin_Continue;
     }
 
     int client = GetClientOfUserId(event.GetInt("userid"));
     SetEntPropFloat(client, Prop_Send, "m_fForceTeam", 3600.0);
-}
-
-/**
- * Called when a player spawns.
- * Gives default weapons. (better than mp_ct_default_primary since it gives the player the correct skin)
- */
-public Action Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast) {
-    if (!g_Enabled) {
-        return;
-    }
-
-    int client = GetClientOfUserId(event.GetInt("userid"));
-    if (!IsValidClient(client) || !IsOnTeam(client) || g_EditMode || Retakes_InWarmup())
-        return;
-
-    if (!g_RoundSpawnsDecided) {
-        if (IsPlayer(g_BombOwner)) {
-            g_SpawnIndices[g_BombOwner] = SelectSpawn(CS_TEAM_T, true);
-        }
-
-        for (int i = 1; i <= MAXPLAYERS; i++) {
-            if (IsPlayer(i) && IsOnTeam(i) && i != g_BombOwner) {
-                g_SpawnIndices[i] = SelectSpawn(g_Team[i], false);
-            }
-        }
-        g_RoundSpawnsDecided = true;
-    }
-
-    SetupPlayer(client);
+    return Plugin_Continue;
 }
 
 /**
@@ -498,7 +272,7 @@ public Action Event_PlayerSpawn(Event event, const char[] name, bool dontBroadca
  */
 public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
     if (!Retakes_Live()) {
-        return;
+        return Plugin_Continue;
     }
 
     int victim = GetClientOfUserId(event.GetInt("userid"));
@@ -514,6 +288,7 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
             g_RoundPoints[attacker] -= POINTS_KILL;
         }
     }
+    return Plugin_Continue;
 }
 
 /**
@@ -530,22 +305,10 @@ public Action Event_DamageDealt(Event event, const char[] name, bool dontBroadca
     bool validVictim = IsValidClient(victim);
 
     if (validAttacker && validVictim && HelpfulAttack(attacker, victim) ) {
-        int damage = event.GetInt("dmg_health");
+        int damage = event.GetInt("dmg_PlayerHealth");
         g_RoundPoints[attacker] += (damage * POINTS_DMG);
     }
     return Plugin_Continue;
-}
-
-/**
- * Called when the bomb explodes or is defuser, gives ponts to the one that planted/defused it.
- */
-public Action Event_BombPlant(Event event, const char[] name, bool dontBroadcast) {
-    if (!g_Enabled) {
-        return;
-    }
-
-    g_bombPlanted = true;
-    g_bombPlantSignal = false;
 }
 
 /**
@@ -553,13 +316,31 @@ public Action Event_BombPlant(Event event, const char[] name, bool dontBroadcast
  */
 public Action Event_Bomb(Event event, const char[] name, bool dontBroadcast) {
     if (!Retakes_Live()) {
-        return;
+        return Plugin_Continue;
     }
 
     int client = GetClientOfUserId(event.GetInt("userid"));
     if (IsValidClient(client)) {
         g_RoundPoints[client] += POINTS_BOMB;
     }
+    return Plugin_Continue;
+}
+
+/**
+ * Called when a player spawns.
+ * Gives default weapons. (better than mp_ct_default_primary since it gives the player the correct skin)
+ */
+public Action Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast) {
+    if (!g_EnabledCvar.BoolValue) {
+        return Plugin_Continue;
+    }
+
+    int client = GetClientOfUserId(event.GetInt("userid"));
+    if (!IsValidClient(client) || !IsOnTeam(client) || Retakes_InWarmup())
+        return Plugin_Continue;
+
+    SwitchPlayerTeam(client, g_Team[client]);
+    return Plugin_Continue;
 }
 
 /**
@@ -568,51 +349,27 @@ public Action Event_Bomb(Event event, const char[] name, bool dontBroadcast) {
  */
 public Action Event_RoundPreStart(Event event, const char[] name, bool dontBroadcast) {
     if (!Retakes_Live()) {
-        return;
+        return Plugin_Continue;
     }
 
-    g_RoundSpawnsDecided = false;
     RoundEndUpdates();
     UpdateTeams();
     g_HalfTime = false;
-
-    ArrayList ts = new ArrayList();
-    for (int i = 1; i < MaxClients; i++) {
-        if (IsValidClient(i) && IsOnTeam(i)) {
-            Client_RemoveAllWeapons(i);
-            if (GetClientTeam(i) == CS_TEAM_T) {
-                ts.Push(i);
-            }
-        }
-    }
-
-    if (ts.Length >= 1) {
-        int player = RandomElement(ts);
-        g_BombOwner = player;
-    }
-    delete ts;
-}
-
-public Action Event_RoundPostStart(Event event, const char[] name, bool dontBroadcast) {
-    if (!Retakes_Live()) {
-        return;
-    }
-
-    if (!g_EditMode) {
-        GameRules_SetProp("m_iRoundTime", g_hRoundTime.IntValue, 4, 0, true);
-        Retakes_MessageToAll("%t", "RetakeSiteMessage", SITESTRING(g_Bombsite), g_NumT, g_NumCT);
-    }
-
-    g_bombPlanted = false;
+    return Plugin_Continue;
 }
 
 /**
  * Round freezetime end, resets the round points and unfreezes the players.
  */
 public Action Event_RoundFreezeEnd(Event event, const char[] name, bool dontBroadcast) {
+    if (!g_EnabledCvar.BoolValue) {
+        return Plugin_Continue;
+    }
+
     for (int i = 1; i <= MaxClients; i++) {
         g_RoundPoints[i] = 0;
     }
+    return Plugin_Continue;
 }
 
 /**
@@ -620,7 +377,7 @@ public Action Event_RoundFreezeEnd(Event event, const char[] name, bool dontBroa
  */
 public Action Event_RoundEnd(Event event, const char[] name, bool dontBroadcast) {
     if (!Retakes_Live()) {
-        return;
+        return Plugin_Continue;
     }
 
     if (g_ActivePlayers >= 2) {
@@ -660,6 +417,7 @@ public Action Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
             CounterTerroristsWon();
         }
     }
+    return Plugin_Continue;
 }
 
 public Action Event_HalfTime(Event event, const char[] name, bool dontBroadcast)
@@ -715,20 +473,6 @@ public void RoundEndUpdates() {
  * This assumes the priority queue has already been built (e.g. by RoundEndUpdates).
  */
 public void UpdateTeams() {
-    for (int i = 0; i < MAX_SPAWNS; i++) {
-        g_SpawnTaken[i] = false;
-    }
-
-    if (g_NumSpawns < g_hMaxPlayers.IntValue) {
-        LogError("This map does not have enough spawns!");
-        return;
-    }
-
-    g_Bombsite = GetRandomBool() ? BombsiteA : BombsiteB;
-    Call_StartForward(g_OnSitePicked);
-    Call_PushCellRef(g_Bombsite);
-    Call_Finish();
-
     g_ActivePlayers = PQ_GetSize(g_hRankingQueue);
     if (g_ActivePlayers > g_hMaxPlayers.IntValue)
         g_ActivePlayers = g_hMaxPlayers.IntValue;
@@ -791,7 +535,6 @@ public void UpdateTeams() {
     Call_StartForward(g_hOnTeamsSet);
     Call_PushCell(ts);
     Call_PushCell(cts);
-    Call_PushCell(g_Bombsite);
     Call_Finish();
 
     for (int i = 0; i < ts.Length; i++) {
@@ -799,13 +542,6 @@ public void UpdateTeams() {
         if (IsValidClient(client)) {
             SwitchPlayerTeam(client, CS_TEAM_T);
             g_Team[client] = CS_TEAM_T;
-            g_PlayerPrimary[client] = "weapon_ak47";
-            g_PlayerSecondary[client] = "weapon_glock";
-            g_PlayerNades[client] = "";
-            g_PlayerKit[client] = false;
-            g_PlayerHealth[client] = 100;
-            g_PlayerArmor[client] = 100;
-            g_PlayerHelmet[client] = true;
         }
     }
 
@@ -814,13 +550,6 @@ public void UpdateTeams() {
         if (IsValidClient(client)) {
             SwitchPlayerTeam(client, CS_TEAM_CT);
             g_Team[client] = CS_TEAM_CT;
-            g_PlayerPrimary[client] = "weapon_m4a1";
-            g_PlayerSecondary[client] = "weapon_hkp2000";
-            g_PlayerNades[client] = "";
-            g_PlayerKit[client] = true;
-            g_PlayerHealth[client] = 100;
-            g_PlayerArmor[client] = 100;
-            g_PlayerHelmet[client] = true;
         }
     }
 
@@ -831,12 +560,6 @@ public void UpdateTeams() {
             Queue_EnqueueFront(g_hWaitingQueue, client);
         }
     }
-
-    Call_StartForward(g_OnWeaponsAllocated);
-    Call_PushCell(ts);
-    Call_PushCell(cts);
-    Call_PushCell(g_Bombsite);
-    Call_Finish();
 
     int length = Queue_Length(g_hWaitingQueue);
     for (int i = 0; i < length; i++) {
@@ -872,13 +595,6 @@ public void TerroristsWon() {
 }
 
 public void CounterTerroristsWon() {
-    if (!g_bombPlanted && IsValidClient(g_BombOwner) && g_RoundCount >= 3) {
-        Retakes_MessageToAll("%t", "FailedToPlant", g_BombOwner);
-        Call_StartForward(g_OnFailToPlant);
-        Call_PushCell(g_BombOwner);
-        Call_Finish();
-    }
-
     if (g_WinStreak >= 3) {
         Retakes_MessageToAll("%t", "WinStreakOver", g_WinStreak);
     }
@@ -897,40 +613,3 @@ void CheckRoundDone() {
 public int GetOtherTeam(int team) {
     return (team == CS_TEAM_CT) ? CS_TEAM_T : CS_TEAM_CT;
 }
-
-public Bombsite GetOtherSite(Bombsite site) {
-    return (site == BombsiteA) ? BombsiteB : BombsiteA;
-}
-
-// pugsetup (github.com/splewis/csgo-pug-setup) integrations
-#if defined _pugsetup_included
-public Action PugSetup_OnSetupMenuOpen(int client, Menu menu, bool displayOnly) {
-    int leader = PugSetup_GetLeader(false);
-    if (!IsPlayer(leader)) {
-        PugSetup_SetLeader(client);
-    }
-
-    int style = ITEMDRAW_DEFAULT;
-    if (!PugSetup_HasPermissions(client, Permission_Leader) || displayOnly) {
-        style = ITEMDRAW_DISABLED;
-    }
-
-    if (g_Enabled) {
-        menu.AddItem("disable_retakes", "Disable retakes", style);
-    } else {
-        menu.AddItem("enable_retakes", "Enable retakes", style);
-    }
-
-    return Plugin_Continue;
-}
-
-public void PugSetup_OnSetupMenuSelect(Menu menu, int client, const char[] selected_info, int selected_position) {
-    if (StrEqual(selected_info, "disable_retakes")) {
-        g_EnabledCvar.SetInt(0);
-        PugSetup_GiveSetupMenu(client, false, selected_position);
-    } else if (StrEqual(selected_info, "enable_retakes")) {
-        g_EnabledCvar.SetInt(1);
-        PugSetup_GiveSetupMenu(client, false, selected_position);
-    }
-}
-#endif
